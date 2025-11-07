@@ -7,6 +7,8 @@ app = Flask(__name__)
 
 # ================== CONFIG ==================
 
+# Tokenul botului tau din BotFather.
+# In Render trebuie setat ca Environment Variable cu numele BOT_TOKEN.
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Lipseste BOT_TOKEN. Seteaza variabila BOT_TOKEN in Render.")
@@ -14,10 +16,10 @@ if not BOT_TOKEN:
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 TELEGRAM_FILE_API = f"https://api.telegram.org/file/bot{BOT_TOKEN}"
 
-# chat_id -> stare curenta
+# chat_id -> stare:
 # "await": None / "IN" / "PUB_ZERO"
-# "in_path": calea fisierului IN salvat pe server
-# "pub_zero_path": calea fisierului PUB_Zero salvat pe server
+# "in_path": path fisier IN pe server
+# "pub_zero_path": path fisier PUB_Zero pe server
 USER_STATE = {}
 
 
@@ -25,8 +27,8 @@ USER_STATE = {}
 
 def get_user_dir(chat_id: int) -> str:
     """
-    Folder separat pentru fiecare chat, in /tmp.
-    Aici salvam fisierele incarcate prin Telegram.
+    Folder separat pentru fiecare utilizator (chat).
+    Fisierele se salveaza in /tmp, nu pe discul tau.
     """
     base = "/tmp/telegram_excel_bot"
     path = os.path.join(base, str(chat_id))
@@ -51,17 +53,21 @@ def send_message(chat_id, text, keyboard=False):
     try:
         requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=10)
     except Exception:
-        # in productie am putea loga eroarea
+        # aici am putea loga eroarea daca vrem
         pass
 
 
 def download_file(file_id: str, dest_path: str) -> bool:
     """
-    Descarca un fisier Telegram in dest_path.
+    Descarca fisierul trimis pe Telegram in dest_path.
     """
-    # 1) luam file_path
-    r = requests.get(f"{TELEGRAM_API}/getFile", params={"file_id": file_id}, timeout=10)
-    data = r.json()
+    # 1) luam file_path de la Telegram
+    try:
+        r = requests.get(f"{TELEGRAM_API}/getFile", params={"file_id": file_id}, timeout=10)
+        data = r.json()
+    except Exception:
+        return False
+
     if not data.get("ok"):
         return False
 
@@ -69,24 +75,49 @@ def download_file(file_id: str, dest_path: str) -> bool:
     url = f"{TELEGRAM_FILE_API}/{file_path}"
 
     # 2) descarcam continutul
-    resp = requests.get(url, timeout=30)
+    try:
+        resp = requests.get(url, timeout=30)
+    except Exception:
+        return False
+
     if resp.status_code != 200:
         return False
 
-    with open(dest_path, "wb") as f:
-        f.write(resp.content)
+    try:
+        with open(dest_path, "wb") as f:
+            f.write(resp.content)
+    except Exception:
+        return False
 
     return True
 
 
-# ================== ROUTE HEALTHCHECK ==================
+def send_file(chat_id: int, file_path: str, caption: str = ""):
+    """
+    Trimite un fisier inapoi utilizatorului prin Telegram.
+    """
+    if not os.path.isfile(file_path):
+        send_message(chat_id, f"Nu gasesc fisierul: {os.path.basename(file_path)}")
+        return
+
+    with open(file_path, "rb") as f:
+        files = {"document": (os.path.basename(file_path), f)}
+        data = {"chat_id": chat_id, "caption": caption}
+        try:
+            requests.post(f"{TELEGRAM_API}/sendDocument", data=data, files=files, timeout=60)
+        except Exception:
+            # daca pica, trimitem macar un mesaj text
+            send_message(chat_id, "Nu am reusit sa trimit fisierul (eroare retea).")
+
+
+# ================== HEALTHCHECK ==================
 
 @app.route("/", methods=["GET"])
 def index():
     return "Bot online ✅", 200
 
 
-# ================== ROUTA WEBHOOK ==================
+# ================== WEBHOOK ==================
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -101,51 +132,51 @@ def webhook():
     if not chat_id:
         return jsonify(ok=True)
 
-    # init stare
+    # init stare pentru acest chat
     if chat_id not in USER_STATE:
         USER_STATE[chat_id] = {"await": None, "in_path": None, "pub_zero_path": None}
 
-    # 1) daca este document incarcat
+    # 1) daca a trimis document
     if "document" in message:
         return handle_document(chat_id, message["document"])
 
-    # 2) daca este text
+    # 2) daca a trimis text
     text = (message.get("text") or "").strip()
 
-    # /start
+    # /start – reset + instructiuni
     if text.startswith("/start"):
         USER_STATE[chat_id] = {"await": None, "in_path": None, "pub_zero_path": None}
         send_message(
             chat_id,
             "Salut 👋\n\n"
-            "Trimite fisierele astfel:\n"
+            "Cum functionez:\n"
             "1️⃣ Apasa „📂 Trimit IN” si trimite fisierul IN (playlist).\n"
             "2️⃣ Apasa „📂 Trimit PUB_Zero” si trimite fisierul PUB_Zero.\n"
-            "3️⃣ Apasa „🚀 Proceseaza” ca sa primesti fisierele modificate.",
+            "3️⃣ Apasa „🚀 Proceseaza” ca sa primesti fisierele modificate (_modificat).",
             keyboard=True,
         )
         return jsonify(ok=True)
 
-    # selecteaza IN
+    # a cerut sa trimita IN
     if text == "📂 Trimit IN":
         USER_STATE[chat_id]["await"] = "IN"
         send_message(chat_id, "Trimite acum fisierul pentru IN (Excel).")
         return jsonify(ok=True)
 
-    # selecteaza PUB_Zero
+    # a cerut sa trimita PUB_Zero
     if text == "📂 Trimit PUB_Zero":
         USER_STATE[chat_id]["await"] = "PUB_ZERO"
         send_message(chat_id, "Trimite acum fisierul pentru PUB_Zero (Excel).")
         return jsonify(ok=True)
 
-    # porneste procesarea
+    # a cerut procesarea
     if text == "🚀 Proceseaza":
         return handle_process(chat_id)
 
-    # alt text - instructiuni
+    # orice alt text → re-explicam
     send_message(
         chat_id,
-        "Te rog foloseste butoanele de jos:\n"
+        "Te rog foloseste butoanele:\n"
         "📂 Trimit IN → apoi trimite fisierul IN\n"
         "📂 Trimit PUB_Zero → apoi trimite fisierul PUB_Zero\n"
         "🚀 Proceseaza → pentru a primi fisierele modificate.",
@@ -163,7 +194,7 @@ def handle_document(chat_id: int, document: dict):
     if role not in ("IN", "PUB_ZERO"):
         send_message(
             chat_id,
-            "Mai intai apasa „📂 Trimit IN” sau „📂 Trimit PUB_Zero”, apoi trimite fisierul corespunzator.",
+            "Mai intai apasa „📂 Trimit IN” sau „📂 Trimit PUB_Zero”, apoi trimite fisierul potrivit.",
             keyboard=True,
         )
         return jsonify(ok=True)
@@ -176,35 +207,34 @@ def handle_document(chat_id: int, document: dict):
     if not ext:
         ext = ".xlsx"
 
-    # salvam cu nume fix in /tmp
     if role == "IN":
-        local_path = os.path.join(user_dir, "IN" + ext)
+        dest_path = os.path.join(user_dir, "IN" + ext)
     else:
-        local_path = os.path.join(user_dir, "PUB_Zero" + ext)
+        dest_path = os.path.join(user_dir, "PUB_Zero" + ext)
 
-    ok = download_file(file_id, local_path)
+    ok = download_file(file_id, dest_path)
     if not ok:
         send_message(chat_id, "Nu am reusit sa descarc fisierul. Incearca din nou.")
         return jsonify(ok=True)
 
     if role == "IN":
-        state["in_path"] = local_path
+        state["in_path"] = dest_path
         send_message(chat_id, "Am salvat fisierul IN ✅")
     else:
-        state["pub_zero_path"] = local_path
+        state["pub_zero_path"] = dest_path
         send_message(chat_id, "Am salvat fisierul PUB_Zero ✅")
 
     state["await"] = None
     USER_STATE[chat_id] = state
 
-    # daca avem ambele, anunta-l
+    # daca avem ambele fisiere, anuntam
     if state.get("in_path") and state.get("pub_zero_path"):
         send_message(chat_id, "Ambele fisiere sunt pregatite ✅\nApasa „🚀 Proceseaza”.", keyboard=True)
 
     return jsonify(ok=True)
 
 
-# ================== HANDLE PROCES ==================
+# ================== HANDLE PROCESS ==================
 
 def handle_process(chat_id: int):
     state = USER_STATE.get(chat_id) or {}
@@ -212,32 +242,30 @@ def handle_process(chat_id: int):
     pub_zero_path = state.get("pub_zero_path")
 
     if not in_path or not pub_zero_path:
-        msg_lines = ["Nu pot porni procesarea. Lipsesc:"]
+        msg = "Nu pot porni procesarea. Lipsesc:\n"
         if not in_path:
-            msg_lines.append("- fisierul IN")
+            msg += "- fisierul IN\n"
         if not pub_zero_path:
-            msg_lines.append("- fisierul PUB_Zero")
-        msg_lines.append("")
-        msg_lines.append("Foloseste butoanele pentru a trimite fisierele.")
-        send_message(chat_id, "\n".join(msg_lines), keyboard=True)
+            msg += "- fisierul PUB_Zero\n"
+        msg += "\nFoloseste butoanele pentru a trimite fisierele."
+        send_message(chat_id, msg, keyboard=True)
         return jsonify(ok=True)
 
     send_message(chat_id, "Procesez fisierele... ⏳")
 
     try:
-        # 1) Din PUB_Zero → PUB_IN (_modificat)
+        # 1) PUB_Zero -> PUB_IN (_modificat)
         pub_in_path = format_pub_zero(pub_zero_path)
 
-        # 2) Din IN + PUB_IN → IN_modificat
+        # 2) IN + PUB_IN -> IN_modificat
         final_path = run_combined_flow(in_path, pub_in_path)
 
-        # Trimitem fisierele inapoi prin Telegram
+        # trimitem ambele fisiere inapoi
         send_file(chat_id, pub_in_path, "PUB_IN (din PUB_Zero)")
-        send_file(chat_id, final_path, "FINAL (din IN + PUB_IN)")
+        send_file(chat_id, final_path, "IN_modificat (din IN + PUB_IN)")
 
         send_message(chat_id, "Gata ✅ Ti-am trimis fisierele modificate.")
-
-        # optional: resetam starea, pentru un nou set de fisiere
+        # reset pentru urmatorul set
         USER_STATE[chat_id] = {"await": None, "in_path": None, "pub_zero_path": None}
 
     except Exception as e:
@@ -246,21 +274,9 @@ def handle_process(chat_id: int):
     return jsonify(ok=True)
 
 
-def send_file(chat_id: int, file_path: str, caption: str = ""):
-    if not os.path.isfile(file_path):
-        send_message(chat_id, f"Nu gasesc fisierul: {os.path.basename(file_path)}")
-        return
-    with open(file_path, "rb") as f:
-        files = {"document": (os.path.basename(file_path), f)}
-        data = {"chat_id": chat_id, "caption": caption}
-        try:
-            requests.post(f"{TELEGRAM_API}/sendDocument", data=data, files=files, timeout=60)
-        except Exception:
-            pass
-
-
-# ================== MAIN (pentru debug local) ==================
+# ================== MAIN ==================
 
 if __name__ == "__main__":
+    # pentru rulare locala (Render seteaza PORT automat)
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
