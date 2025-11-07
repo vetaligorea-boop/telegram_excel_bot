@@ -6,13 +6,12 @@ from processor import format_pub_zero, run_combined_flow
 # ============================
 # CONFIG
 # ============================
-BOT_TOKEN = "8548367764:AAHLp9wmOQcHsMWWLrvAIxAr_TzVxfJU-gg"  # <-- tokenul tău real
+BOT_TOKEN = "8548367764:AAHLp9wmOQcHsMWWLrvAIxAr_TzVxfJU-gg"
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 FILE_API_URL = f"https://api.telegram.org/file/bot{BOT_TOKEN}"
 ALLOWED_EXTS = [".xls", ".xlsx", ".xlsm"]
 
 app = Flask(__name__)
-
 USER_STATE = {}
 
 # ============================
@@ -33,7 +32,11 @@ def ensure_user_dir(chat_id):
     return user_dir
 
 def send_message(chat_id, text, reply_markup=None):
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+    }
     if reply_markup:
         payload["reply_markup"] = reply_markup
     requests.post(f"{API_URL}/sendMessage", json=payload)
@@ -64,7 +67,9 @@ def main_keyboard():
                 {"text": "📂 Trimit IN", "callback_data": "SEND_IN"},
                 {"text": "📂 Trimit PUB_Zero", "callback_data": "SEND_PUB_ZERO"},
             ],
-            [{"text": "🚀 Procesează", "callback_data": "PROCESS"}],
+            [
+                {"text": "🚀 Procesează", "callback_data": "PROCESS"},
+            ],
         ]
     }
 
@@ -87,17 +92,18 @@ def handle_document(message):
 
     file_id = message["document"]["file_id"]
     file_name = message["document"]["file_name"]
+
     _, ext = os.path.splitext(file_name)
     ext = ext.lower()
-
     if ext not in ALLOWED_EXTS:
         send_message(chat_id, "⚠️ Accept doar fișiere .xls, .xlsx sau .xlsm.")
         return
 
     info = get_file(file_id)
     file_url = f"{FILE_API_URL}/{info['file_path']}"
+
     user_dir = ensure_user_dir(chat_id)
-    local_path = os.path.join(user_dir, file_name)
+    local_path = os.path.join(user_dir, file_name)  # păstrăm numele original
 
     resp = requests.get(file_url)
     resp.raise_for_status()
@@ -114,10 +120,14 @@ def handle_document(message):
     state["await"] = None
 
     if state.get("in_path") and state.get("pub_zero_path"):
-        send_message(chat_id, "✅ Ambele fișiere sunt pregătite!\nApasă „🚀 Procesează”.", main_keyboard())
+        send_message(
+            chat_id,
+            "✅ Ambele fișiere sunt pregătite!\nApasă „🚀 Procesează”.",
+            main_keyboard()
+        )
 
 # ============================
-# HANDLE CALLBACK
+# HANDLE CALLBACK (BUTOANE)
 # ============================
 
 def handle_callback_query(callback):
@@ -145,7 +155,11 @@ def handle_callback_query(callback):
             missing.append("- fișierul PUB_Zero")
 
         if missing:
-            send_message(chat_id, "⚠️ Încă lipsesc fișiere:\n" + "\n".join(missing), main_keyboard())
+            send_message(
+                chat_id,
+                "⚠️ Încă lipsesc fișiere:\n" + "\n".join(missing),
+                main_keyboard()
+            )
             return
 
         send_message(chat_id, "⏳ Procesez fișierele...")
@@ -158,10 +172,10 @@ def handle_callback_query(callback):
             send_document(chat_id, final_path, "📄 Desfasurator FINAL (IN_modificat) ✅")
 
         except Exception as e:
-            send_message(chat_id, f"❌ Eroare la procesare: {e}")
+            send_message(chat_id, f"❌ Eroare la procesare: {e}", main_keyboard())
 
 # ============================
-# FLASK ROUTES
+# ROUTE-URI FLASK
 # ============================
 
 @app.route("/", methods=["GET"])
@@ -171,12 +185,13 @@ def index():
 @app.route("/", methods=["POST"])
 def webhook():
     update = request.get_json(force=True)
+
     if "message" in update:
         msg = update["message"]
-        chat_id = msg["chat"]["id"]
         text = msg.get("text", "")
 
         if text == "/start":
+            chat_id = msg["chat"]["id"]
             USER_STATE[str(chat_id)] = {}
             send_message(
                 chat_id,
@@ -189,6 +204,7 @@ def webhook():
         elif "document" in msg:
             handle_document(msg)
         else:
+            chat_id = msg["chat"]["id"]
             send_message(chat_id, "Folosește butoanele de mai jos 👇", main_keyboard())
 
     if "callback_query" in update:
@@ -197,7 +213,8 @@ def webhook():
     return jsonify(ok=True)
 
 # ============================
-# RUN LOCALLY (DEBUG)
+# LOCAL RUN
 # ============================
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
