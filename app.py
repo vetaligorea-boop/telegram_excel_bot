@@ -12,7 +12,7 @@ if not BOT_TOKEN:
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 TELEGRAM_FILE_API = f"https://api.telegram.org/file/bot{BOT_TOKEN}"
 
-# stare in memorie: pentru fiecare chat_id tinem IN si PUB_Zero
+# stare simpla in memorie: pentru fiecare chat_id tinem IN si PUB_Zero
 USER_STATE = {}  # chat_id -> {"await": None/"IN"/"PUB_ZERO", "in_path": str, "pub_zero_path": str}
 
 
@@ -38,16 +38,15 @@ def webhook():
     message = update["message"]
     chat_id = message["chat"]["id"]
 
-    # init state
     if chat_id not in USER_STATE:
         USER_STATE[chat_id] = {"await": None, "in_path": None, "pub_zero_path": None}
 
-    # document upload
+    # daca a trimis document
     if "document" in message:
         return handle_document(message, chat_id)
 
-    # text / comenzi
-    text = message.get("text", "") or ""
+    # daca e text
+    text = (message.get("text") or "").strip()
 
     if text.startswith("/start"):
         USER_STATE[chat_id] = {"await": None, "in_path": None, "pub_zero_path": None}
@@ -56,8 +55,9 @@ def webhook():
             "Salut 👋\n\n"
             "1️⃣ Apasa „📂 Trimit IN” si trimite fisierul IN (.xlsx/.xlsm)\n"
             "2️⃣ Apasa „📂 Trimit PUB_Zero” si trimite fisierul PUB_Zero\n"
-            "3️⃣ Apasa „🚀 Proceseaza” ca sa primesti PUB_IN si FINAL."
-        , keyboard=True)
+            "3️⃣ Apasa „🚀 Proceseaza” ca sa primesti PUB_IN si FINAL.",
+            keyboard=True,
+        )
         return jsonify(ok=True)
 
     if text == "📂 Trimit IN":
@@ -80,7 +80,7 @@ def webhook():
         "📂 Trimit IN -> apoi trimite fisierul IN\n"
         "📂 Trimit PUB_Zero -> apoi trimite fisierul PUB_Zero\n"
         "🚀 Proceseaza -> pentru rezultat.",
-        keyboard=True
+        keyboard=True,
     )
     return jsonify(ok=True)
 
@@ -95,13 +95,12 @@ def handle_document(message, chat_id):
     if role not in ("IN", "PUB_ZERO"):
         send_message(
             chat_id,
-            "Spune-mi intai ce fișier este:\n"
-            "Apasa „📂 Trimit IN” sau „📂 Trimit PUB_Zero”, apoi retrimite fisierul.",
-            keyboard=True
+            "Mai intai apasa „📂 Trimit IN” sau „📂 Trimit PUB_Zero”, apoi trimite fisierul corespunzator.",
+            keyboard=True,
         )
         return jsonify(ok=True)
 
-    # luam file_path
+    # luam file_path de la Telegram
     r = requests.get(f"{TELEGRAM_API}/getFile", params={"file_id": file_id})
     data = r.json()
     if not data.get("ok"):
@@ -117,9 +116,12 @@ def handle_document(message, chat_id):
 
     # salvam local in folderul utilizatorului
     user_dir = get_user_dir(chat_id)
-    ext = os.path.splitext(file_name)[1] or ".xlsx"
+    _, ext = os.path.splitext(file_name)
+    if not ext:
+        ext = ".xlsx"
     save_name = f"{role}{ext}"
     local_path = os.path.join(user_dir, save_name)
+
     with open(local_path, "wb") as f:
         f.write(resp.content)
 
@@ -130,11 +132,9 @@ def handle_document(message, chat_id):
         state["pub_zero_path"] = local_path
         send_message(chat_id, "Am salvat fisierul PUB_Zero ✅")
 
-    # dupa upload, resetam "await"
     state["await"] = None
 
-    # daca avem ambele, sugeram procesarea
-    if state["in_path"] and state["pub_zero_path"]:
+    if state.get("in_path") and state.get("pub_zero_path"):
         send_message(chat_id, "Ambele fisiere sunt pregatite ✅\nApasa „🚀 Proceseaza”.", keyboard=True)
 
     return jsonify(ok=True)
@@ -146,7 +146,7 @@ def handle_process(chat_id):
     pub_zero_path = state.get("pub_zero_path")
 
     if not in_path or not pub_zero_path:
-        msg = "Inca lipseste ceva:\n"
+        msg = "Inca lipsesc fisiere:\n"
         if not in_path:
             msg += "- fisierul IN\n"
         if not pub_zero_path:
@@ -155,7 +155,7 @@ def handle_process(chat_id):
         send_message(chat_id, msg, keyboard=True)
         return jsonify(ok=True)
 
-    send_message(chat_id, "Procesez fisierele... 📊 Te rog asteapta rezultatul.")
+    send_message(chat_id, "Procesez fisierele... 📊")
 
     try:
         # 1) PUB_Zero -> PUB_IN
@@ -177,8 +177,6 @@ def handle_process(chat_id):
             requests.post(f"{TELEGRAM_API}/sendDocument", data=data, files=files)
 
         send_message(chat_id, "Gata ✅ Ti-am trimis PUB_IN si FINAL.")
-
-        # optional: resetam starea
         USER_STATE[chat_id] = {"await": None, "in_path": None, "pub_zero_path": None}
 
     except Exception as e:
@@ -190,7 +188,7 @@ def handle_process(chat_id):
 def send_message(chat_id, text, keyboard=False):
     payload = {
         "chat_id": chat_id,
-        "text": text
+        "text": text,
     }
     if keyboard:
         payload["reply_markup"] = {
@@ -199,7 +197,7 @@ def send_message(chat_id, text, keyboard=False):
                 [{"text": "🚀 Proceseaza"}],
             ],
             "resize_keyboard": True,
-            "one_time_keyboard": False
+            "one_time_keyboard": False,
         }
     requests.post(f"{TELEGRAM_API}/sendMessage", json=payload)
 
