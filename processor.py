@@ -4,7 +4,7 @@ from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 import xlrd  # pentru .xls
 
-# ---------------- STILURI ----------------
+# ================== STILURI ==================
 
 YELLOW = "FFFF00"
 GREEN_DARK = "00B050"   # RGB(0,176,80)
@@ -27,7 +27,8 @@ thin = Side(style="thin")
 thin_border = Border(left=thin, right=thin, top=thin, bottom=thin)
 no_border = Border()
 
-# ---------------- HELPERI ----------------
+
+# ================== HELPERI ==================
 
 def nz(v):
     if v is None:
@@ -38,6 +39,7 @@ def nz(v):
         return ""
     return s.strip()
 
+
 def last_data_row(ws, col_idx: int) -> int:
     last = ws.max_row
     while last > 0:
@@ -47,9 +49,12 @@ def last_data_row(ws, col_idx: int) -> int:
         last -= 1
     return 1
 
+
 def convert_xls_to_xlsx(xls_path: str) -> str:
     """
-    Citeste .xls cu xlrd si il salveaza ca .xlsx (valori).
+    Conversie minimala .xls -> .xlsx (valori doar).
+    Folosita DOAR pentru fisiere primite ca .xls.
+    Originalul .xls NU este modificat.
     """
     if not os.path.isfile(xls_path):
         raise ValueError("Fisier .xls inexistent.")
@@ -58,6 +63,7 @@ def convert_xls_to_xlsx(xls_path: str) -> str:
 
     book = xlrd.open_workbook(xls_path, formatting_info=False)
     wb = Workbook()
+    # stergem sheet-ul gol creat automat
     wb.remove(wb.active)
 
     for si in range(book.nsheets):
@@ -66,14 +72,15 @@ def convert_xls_to_xlsx(xls_path: str) -> str:
         ws = wb.create_sheet(title=title)
         for r in range(sh.nrows):
             for c in range(sh.ncols):
-                ws.cell(row=r+1, column=c+1).value = sh.cell_value(r, c)
+                ws.cell(row=r + 1, column=c + 1).value = sh.cell_value(r, c)
 
     wb.save(new_path)
     return new_path
 
+
 # ==========================================================
-# 1) PUB_Zero -> PUB_IN (ConvertAndFormatCols7_8_9_10_11)
-#    => intoarce path-ul fisierului *_modificat (PUB_IN)
+# 1) PUB_Zero -> PUB_IN  (ConvertAndFormatCols7_8_9_10_11)
+#    DOAR coloanele G-K, restul ramane intact
 # ==========================================================
 
 def format_pub_zero(pub_zero_path: str) -> str:
@@ -84,9 +91,8 @@ def format_pub_zero(pub_zero_path: str) -> str:
     base_dir = os.path.dirname(original_path)
     base_name, ext = os.path.splitext(os.path.basename(original_path))
 
-    # .xls -> convertim la .xlsx
-    xls_input = ext.lower() == ".xls"
-    if xls_input:
+    # daca e .xls -> lucram pe copie convertita
+    if ext.lower() == ".xls":
         pub_zero_path = convert_xls_to_xlsx(original_path)
         base_name, ext = os.path.splitext(os.path.basename(pub_zero_path))
 
@@ -103,7 +109,7 @@ def format_pub_zero(pub_zero_path: str) -> str:
     last_row = last_data_row(ws, 7)
     if last_row <= 1:
         wb.close()
-        raise ValueError("Nu sunt date in coloana G (PUB_Zero).")
+        raise ValueError("Nu sunt date in coloana G pentru PUB_Zero.")
 
     for row in range(2, last_row + 1):
         c7 = ws.cell(row=row, column=7)
@@ -112,12 +118,12 @@ def format_pub_zero(pub_zero_path: str) -> str:
         c10 = ws.cell(row=row, column=10)
         c11 = ws.cell(row=row, column=11)
 
-        # G
+        # ---- G: stil + galben ----
         c7.font = font12_bold
         c7.fill = fill_yellow
         c7.alignment = align_left
 
-        # H (sec -> HH:MM:SS)
+        # ---- H: doar daca numeric >0 -> HH:MM:SS, apoi stil ----
         val_h = c8.value
         if isinstance(val_h, (int, float)) and val_h > 0:
             total = int(val_h)
@@ -129,7 +135,7 @@ def format_pub_zero(pub_zero_path: str) -> str:
         c8.fill = fill_yellow
         c8.alignment = align_right
 
-        # I
+        # ---- I: doar daca nu e gol ----
         if nz(c9.value) != "":
             c9.font = font14_bold
             c9.fill = fill_green
@@ -138,7 +144,7 @@ def format_pub_zero(pub_zero_path: str) -> str:
         else:
             c9.border = no_border
 
-        # J
+        # ---- J: prefix/sufix "_" ----
         if nz(c10.value) != "":
             s_val = nz(c10.value)
             if s_val.isdigit() and 1 <= int(s_val) <= 9:
@@ -149,26 +155,24 @@ def format_pub_zero(pub_zero_path: str) -> str:
         c10.fill = fill_yellow
         c10.alignment = align_center
 
-        # K
+        # ---- K: border doar daca are continut ----
         if nz(c11.value) != "":
             c11.border = thin_border
         else:
             c11.border = no_border
 
-    # nume ca in macro: _modificat + extensia
-    if xls_input:
-        out_ext = ".xlsx"  # nu putem salva ca .xls
-    else:
-        out_ext = ext or ".xlsx"
-
+    # Nume ca in macro: _modificat + aceeasi extensie (xls -> xlsx)
+    out_ext = ".xlsx" if ext.lower() == ".xls" else ext or ".xlsx"
     out_name = f"{base_name}_modificat{out_ext}"
     out_path = os.path.join(base_dir, out_name)
     wb.save(out_path)
     wb.close()
-    return out_path  # acesta e PUB_IN
+
+    return out_path  # acesta este PUB_IN
+
 
 # ==========================================================
-# 2) FLOW COMBINAT (IN + PUB_IN) -> FINAL (IN_modificat)
+# 2) FLOW COMBINAT (IN + PUB_IN) -> IN_modificat
 # ==========================================================
 
 def col4_excluded(val: str) -> bool:
@@ -191,13 +195,16 @@ def col4_excluded(val: str) -> bool:
     }
     return v in excl
 
+
 def color_red_col_e(ws):
     last = max(last_data_row(ws, 4), last_data_row(ws, 5))
     for r in range(1, last + 1):
         val_d = nz(ws.cell(r, 4).value)
         val_e = nz(ws.cell(r, 5).value)
         if val_e != "" and not col4_excluded(val_d):
-            ws.cell(r, 5).fill = fill_red
+            c = ws.cell(r, 5)
+            c.fill = fill_red  # doar culoarea, ca in macro
+
 
 def delete_between_playlist_markers(ws):
     last = last_data_row(ws, 6)
@@ -223,6 +230,7 @@ def delete_between_playlist_markers(ws):
                 break
         i += 1
 
+
 def intervals_def():
     raw = [
         "06:00:00,06:30:00,06_30,06_20,06_10", "06:30:01,06:59:00,06_50,06_40,06_45",
@@ -246,11 +254,12 @@ def intervals_def():
         "00:00:00,00:31:00,00_20,00_10,00_30", "00:32:00,00:59:00,00_50,00_40,00_45",
         "01:00:00,01:31:00,01_20,01_10,01_30", "01:32:00,01:59:00,01_50,01_40,01_45",
     ]
-    intervals = []
+    out = []
     for row in raw:
         parts = row.split(",")
-        intervals.append((parts[0], parts[1], parts[2:]))
-    return intervals
+        out.append((parts[0], parts[1], parts[2:]))
+    return out
+
 
 def time_in_range(t, start_str, end_str):
     def to_time(s):
@@ -259,6 +268,7 @@ def time_in_range(t, start_str, end_str):
     start = to_time(start_str)
     end = to_time(end_str)
     return start <= t <= end
+
 
 def collect_block_for_interval(ws_in, ora_start, ora_end):
     last_in = last_data_row(ws_in, 3)
@@ -285,9 +295,8 @@ def collect_block_for_interval(ws_in, ora_start, ora_end):
                             tt = None
                         if tt and not time_in_range(tt, ora_start, ora_end):
                             break
-                    val_j = nz(ws_in.cell(rr, 10).value)
-                    if val_j != "":
-                        iduri.append(val_j)
+                    if nz(ws_in.cell(rr, 10).value) != "":
+                        iduri.append(nz(ws_in.cell(rr, 10).value))
                         colG.append(nz(ws_in.cell(rr, 7).value))
                         colH.append(nz(ws_in.cell(rr, 8).value))
                         colI.append(nz(ws_in.cell(rr, 9).value))
@@ -296,6 +305,7 @@ def collect_block_for_interval(ws_in, ora_start, ora_end):
         r += 1
 
     return iduri, colG, colH, colI
+
 
 def apply_block_to_out(ws_out, iduri, colG, colH, colI, variante):
     if not iduri:
@@ -326,36 +336,34 @@ def apply_block_to_out(ws_out, iduri, colG, colH, colI, variante):
 
             for i in range(len(iduri)):
                 r_ins = start_row + 1 + i
-                g_val = colG[i]
-                h_val = colH[i]
-                id_val = iduri[i]
-                i_val = colI[i]
 
+                # D = G, E = H, F = ID, G = I (stiluri ca in macro)
                 c4 = ws_out.cell(r_ins, 4)
-                c4.value = g_val
+                c4.value = colG[i]
                 c4.font = font14_bold
                 c4.fill = fill_yellow
                 c4.alignment = align_left
 
                 c5 = ws_out.cell(r_ins, 5)
-                c5.value = h_val
+                c5.value = colH[i]
                 c5.font = font14_bold
                 c5.fill = fill_yellow
                 c5.alignment = align_right
 
                 c6 = ws_out.cell(r_ins, 6)
-                c6.value = id_val
+                c6.value = iduri[i]
                 c6.font = font14_bold
                 c6.fill = fill_yellow
                 c6.alignment = align_center
 
                 c7 = ws_out.cell(r_ins, 7)
-                c7.value = i_val
-                if nz(i_val) != "":
+                c7.value = colI[i]
+                if nz(colI[i]) != "":
                     c7.fill = fill_lime
                     c7.border = thin_border
 
-            break  # doar prima varianta potrivita
+            break  # doar prima varianta valida
+
 
 def process_all_intervals(ws_in, ws_out):
     for ora_start, ora_end, variante in intervals_def():
@@ -363,12 +371,12 @@ def process_all_intervals(ws_in, ws_out):
         if iduri:
             apply_block_to_out(ws_out, iduri, colG, colH, colI, variante)
 
+
 def run_combined_flow(in_path: str, pub_in_path: str) -> str:
     """
-    Replica Proceseaza_Flow_Combinat + SaveWithSuffixKeepExt:
-    - IN: .xlsx / .xlsm / .xls (xls convertit)
-    - PUB_IN: fisier *_modificat generat de format_pub_zero
-    - Intoarce: IN_modificat.(ext sau .xlsx)
+    Proceseaza_Flow_Combinat + SaveWithSuffixKeepExt:
+    - nu atinge fisierul original IN
+    - returneaza copie <IN>_modificat.(ext sau .xlsx)
     """
     if not os.path.isfile(in_path):
         raise ValueError("Fisierul IN nu exista.")
@@ -379,8 +387,8 @@ def run_combined_flow(in_path: str, pub_in_path: str) -> str:
     base_dir = os.path.dirname(original_in)
     base_name, ext = os.path.splitext(os.path.basename(original_in))
 
-    xls_input = ext.lower() == ".xls"
-    if xls_input:
+    # .xls -> convertim copie
+    if ext.lower() == ".xls":
         in_path = convert_xls_to_xlsx(original_in)
         out_ext = ".xlsx"
     else:
@@ -393,9 +401,13 @@ def run_combined_flow(in_path: str, pub_in_path: str) -> str:
         raise ValueError("IN nu contine foi.")
     ws_out = wb_out.worksheets[0]
 
+    # PAS 1: colorare rosu pe E
     color_red_col_e(ws_out)
+
+    # PAS 2: sterge intre PLAYLIST_IN_/PLAYLIST_OUT_
     delete_between_playlist_markers(ws_out)
 
+    # PAS 2b: PUB_IN
     wb_in = load_workbook(pub_in_path)
     if not wb_in.worksheets:
         wb_in.close()
@@ -403,11 +415,15 @@ def run_combined_flow(in_path: str, pub_in_path: str) -> str:
         raise ValueError("PUB_IN nu contine foi.")
     ws_in = wb_in.worksheets[0]
 
+    # PAS 2c: intervale
     process_all_intervals(ws_in, ws_out)
+
     wb_in.close()
 
+    # PAS 3: salvare ca in SaveWithSuffixKeepExt
     final_name = f"{base_name}_modificat{out_ext}"
     final_path = os.path.join(base_dir, final_name)
     wb_out.save(final_path)
     wb_out.close()
+
     return final_path
