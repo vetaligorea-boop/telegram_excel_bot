@@ -2,3 +2,4 @@ flask
 requests
 openpyxl
 gunicorn
+xlrd==1.2.0
