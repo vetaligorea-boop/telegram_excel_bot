@@ -1,5 +1,2 @@
-flask
-requests
-openpyxl
-gunicorn
-xlrd==1.2.0
+aiogram==3.22.0
+openpyxl==3.1.5
