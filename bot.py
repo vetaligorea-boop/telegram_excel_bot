@@ -60,6 +60,7 @@ def get_fill_rgb_safe(cell):
         return None
 
 def is_yellow_colorindex6(cell) -> bool:
+    # aproximare pentru ColorIndex 6 (galben)
     rgb = get_fill_rgb_safe(cell)
     return rgb in ("FFFFFF00", "FFFF00")
 
@@ -209,7 +210,6 @@ def get_time_value_for_row(ws, ws_values, row: int):
     - altfel, luăm direct valoarea
     """
     v_cached = ws_values.cell(row, 2).value
-    # dacă cached e 0, e posibil să nu fie calculat -> încercăm formula
     if v_cached not in (None, "") and str(v_cached) != "0":
         return v_cached
 
@@ -265,7 +265,7 @@ def CopiereAutomataCombinata(ws):
         col6_val2 = safe_str(ws.cell(i, 6).value)
         if like_prefix(col6_val2, "PLAYLIST_IN_") or like_prefix(col6_val2, "PLAYLIST_OUT_"):
             set_cell(ws, i, 20, safe_str(ws.cell(i, 4).value))
-            ws.cell(i, 19 (!) ).value = None
+            ws.cell(i, 19).value = None
 
 
 def ActualizareColoana23(ws):
@@ -436,7 +436,7 @@ def process_excel(path: Path) -> Path:
     AdaugaCategoryDinColoana21(ws)
 
     constant = build_constant_fast(wb, ws, ws_values)
-    AdaugaEventNote(constant)  # ✅ coloana 124 revine
+    AdaugaEventNote(constant)
 
     clear_sheet1_cols(ws)
 
