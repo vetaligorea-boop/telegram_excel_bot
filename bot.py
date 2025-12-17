@@ -1,6 +1,7 @@
 import asyncio
 import os
 import tempfile
+import re
 from pathlib import Path
 from datetime import datetime, time as dtime
 
@@ -10,6 +11,7 @@ from aiohttp import web
 
 import openpyxl
 from openpyxl.styles import Font
+
 
 # =========================
 # CONFIG
@@ -23,8 +25,9 @@ PORT = int(os.getenv("PORT", "10000"))
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-ALLOWED_EXT = {".xlsx", ".xlsm"}  # .xls nu e suportat pe Render Free
+ALLOWED_EXT = {".xlsx", ".xlsm"}   # .xls nu e suportat fara LibreOffice
 WHITE_FONT = Font(color="FFFFFFFF")  # alb (ARGB)
+
 
 # =========================
 # HELPERS
@@ -62,8 +65,9 @@ def is_yellow_colorindex6(cell) -> bool:
 
 def format_time_value(v) -> str:
     """
-    Converteste valoarea din Excel (coloana ORA) in text HH:MM:SS.
-    - datetime/time -> ok
+    Converteste valoarea Excel (time) in HH:MM:SS.
+    Accepta:
+    - datetime / time -> ok
     - numar (fractia din zi) -> convertim
     - text "06:30:00" -> pastram
     """
@@ -89,8 +93,151 @@ def format_time_value(v) -> str:
         return "00:00:00"
     return s
 
+
 # =========================
-# VBA logic (partial, fara insert_rows)
+# FORMULA TIME EVALUATOR (pentru "=xx+xx")
+# =========================
+CELL_REF_RE = re.compile(r"^([A-Z]{1,3})(\d+)$")
+
+def col_letters_to_index(letters: str) -> int:
+    """A->1, B->2, ..., Z->26, AA->27 ..."""
+    letters = letters.upper()
+    n = 0
+    for ch in letters:
+        n = n * 26 + (ord(ch) - ord('A') + 1)
+    return n
+
+def parse_cell_ref(token: str):
+    token = token.replace("$", "").strip().upper()
+    m = CELL_REF_RE.match(token)
+    if not m:
+        return None
+    col_letters, row_str = m.group(1), m.group(2)
+    return int(row_str), col_letters_to_index(col_letters)
+
+def excel_time_to_seconds(v) -> float:
+    """Convertește orice reprezentare time într-un număr de secunde."""
+    if v is None or v == "":
+        return 0.0
+    if isinstance(v, datetime):
+        return v.hour * 3600 + v.minute * 60 + v.second
+    if isinstance(v, dtime):
+        return v.hour * 3600 + v.minute * 60 + v.second
+    if isinstance(v, (int, float)):
+        # fracție de zi
+        frac = float(v) % 1.0
+        return frac * 86400.0
+    # text "HH:MM:SS"
+    s = safe_str(v).strip()
+    if re.match(r"^\d{1,2}:\d{2}:\d{2}$", s):
+        hh, mm, ss = s.split(":")
+        return int(hh) * 3600 + int(mm) * 60 + int(ss)
+    if s == "0":
+        return 0.0
+    return 0.0
+
+def seconds_to_excel_fraction(seconds: float) -> float:
+    return (seconds % 86400.0) / 86400.0
+
+def eval_simple_time_formula(formula: str, ws, ws_values):
+    """
+    Evaluează formule SIMPLE cu + și -:
+      =B5+E5
+      =A1+C1
+      =B2+0.001
+      =B2- C2
+    Nu suportă funcții (TIME(), IF(), etc.) – dacă există, return None.
+    """
+    if not isinstance(formula, str):
+        return None
+    f = formula.strip()
+    if not f.startswith("="):
+        return None
+
+    expr = f[1:].replace(" ", "")
+
+    # dacă are funcții, paranteze, etc. -> nu încercăm
+    if "(" in expr or ")" in expr:
+        return None
+
+    # tokenizare simplă pe + și -
+    # păstrăm operatorii
+    parts = re.split(r"([+\-])", expr)
+    if not parts:
+        return None
+
+    total_sec = None
+    op = "+"
+
+    for part in parts:
+        part = part.strip()
+        if part == "":
+            continue
+        if part in ("+", "-"):
+            op = part
+            continue
+
+        sec = None
+
+        # 1) cell ref?
+        ref = parse_cell_ref(part)
+        if ref:
+            r, c = ref
+            # preferăm valoarea "data_only" dacă există
+            v = ws_values.cell(r, c).value
+            if v in (None, ""):
+                v = ws.cell(r, c).value
+            sec = excel_time_to_seconds(v)
+
+        else:
+            # 2) numeric literal?
+            try:
+                num = float(part)
+                # Excel numeric time fraction -> sec
+                sec = excel_time_to_seconds(num)
+            except Exception:
+                # 3) text HH:MM:SS?
+                sec = excel_time_to_seconds(part)
+
+        if sec is None:
+            return None
+
+        if total_sec is None:
+            total_sec = sec
+        else:
+            total_sec = (total_sec + sec) if op == "+" else (total_sec - sec)
+
+    if total_sec is None:
+        return None
+
+    return seconds_to_excel_fraction(total_sec)
+
+
+def get_time_value_for_row(ws, ws_values, row: int):
+    """
+    Ia ora pentru randul 'row' din Sheet1 col 2:
+    - dacă data_only are valoare, o folosim
+    - altfel, dacă e formulă, o calculăm noi (simple + / -)
+    - altfel, luăm direct valoarea
+    """
+    # 1) încearcă valoarea calculată (cached) din data_only
+    v_cached = ws_values.cell(row, 2).value
+    if v_cached not in (None, "", 0, "0"):
+        return v_cached
+
+    # 2) verifică formula în workbook normal
+    v_raw = ws.cell(row, 2).value
+    if isinstance(v_raw, str) and v_raw.strip().startswith("="):
+        v_eval = eval_simple_time_formula(v_raw, ws, ws_values)
+        if v_eval is not None:
+            return v_eval
+
+    # 3) fallback direct
+    return v_raw
+
+
+# =========================
+# LOGIC (partea ta)
 # =========================
 def CopiereAutomataCombinata(ws):
     lastRow = get_last_row_in_col(ws, 4)
@@ -107,10 +254,8 @@ def CopiereAutomataCombinata(ws):
             if (cellValue.startswith("ID PUB_") or cellValue.startswith("ID_PUB_") or cellValue.startswith("ID PUB")):
                 if not (like_prefix(col6, "PLAYLIST_IN_") or like_prefix(col6, "PLAYLIST_OUT_")):
                     set_cell(ws, i, 19, cellValue)
-
             elif col3 not in (None, ""):
                 set_cell(ws, i, 21, cellValue)
-
             else:
                 if safe_str(ws.cell(i, 21).value) == "":
                     set_cell(ws, i, 19, cellValue)
@@ -135,6 +280,7 @@ def CopiereAutomataCombinata(ws):
         if like_prefix(col6_val2, "PLAYLIST_IN_") or like_prefix(col6_val2, "PLAYLIST_OUT_"):
             set_cell(ws, i, 20, safe_str(ws.cell(i, 4).value))
             ws.cell(i, 19).value = None
+
 
 def ActualizareColoana23(ws):
     lastRow = get_last_row_in_col(ws, 6)
@@ -162,6 +308,7 @@ def ActualizareColoana23(ws):
             else:
                 ws.cell(i, 23).font = WHITE_FONT
 
+
 def AdaugaCategoryDinColoana21(ws):
     exclude = {"FILLER", "Ceas + Direct", "CEC"}
     lastRow = get_last_row_in_col(ws, 21)
@@ -171,8 +318,9 @@ def AdaugaCategoryDinColoana21(ws):
         if col21 not in (None, "") and col3 not in exclude:
             set_cell(ws, i, 23, col3)
 
+
 # =========================
-# constant sheet fast build (ORA citita din data_only sheet!)
+# constant sheet build
 # =========================
 def build_constant_fast(wb, ws, ws_values):
     if "constant" in wb.sheetnames:
@@ -182,38 +330,13 @@ def build_constant_fast(wb, ws, ws_values):
     else:
         constant = wb.create_sheet("constant")
 
+    # muta constant la final
     sheets = wb._sheets
     if constant in sheets:
         sheets.remove(constant)
         sheets.append(constant)
 
     lastRow = max(get_last_row_in_col(ws, 6), get_last_row_in_col(ws, 4))
-
-    exclude_contains = [
-        "Jurnalfinanciar", "Jurnalulfinanciar", "PROMO YOUTUBE", "YOUTUBE SOFIA ",
-        "JurnalSportivNEW", "JurnalulSportiv NEW", "JurnalSportiv ", "JurnalulSportiv ",
-        "Carton ap", "Carton 12", "Carton 15", "INTERZIS_AP", "INTERZIS_12", "INTERZIS_15",
-        "EarthTV", "stirile deficienta auz 17 HD", "MeteoNEW", "PostScriptumNEW",
-        "Promourile", "bumper", "Studio comentarii", "Fotbal Repriza 1", "Stiri 10 min",
-        "Fotbal Repriza 2", "REZUMATE", "DE FACTO Cioban", "DE FACTO Ciobanu",
-        "PLANUL EUROPA CIOBANU", "PLANUL EUROPA CIOBAN", "DeFacto Tulbure", "PLANUL EUROPA Tulbure",
-        "ID_Promo_", "INTERZIS_", "ID_PROMO_", "ID PROMO_", "ID_PROMO",
-        "ID_PUB_", "ID PUB_", "ID_PUB", "____PROMOURIIII___"
-    ]
-
-    def excluded_by_list(text: str) -> bool:
-        low = (text or "").lower()
-        for ex in exclude_contains:
-            if ex.lower() in low:
-                return True
-        return False
-
-    def bad_prefix_19(s: str) -> bool:
-        s = s or ""
-        return (
-            s.startswith("ID PROMO_") or s.startswith("ID_PROMO_") or s.startswith("ID PROMO") or
-            s.startswith("ID PUB_") or s.startswith("ID_PUB_") or s.startswith("ID PUB")
-        )
 
     out_row = 1
     insidePlaylist = False
@@ -222,17 +345,12 @@ def build_constant_fast(wb, ws, ws_values):
     def write_row(r19, r20, r21, r23, ora_value):
         nonlocal out_row
 
-        r19s = safe_str(r19).strip()
-        if r19s == "____PROMOURIIII___":
-            constant.cell(out_row, 119).value = None
-        else:
-            set_cell(constant, out_row, 119, r19s)
-
+        set_cell(constant, out_row, 119, safe_str(r19).strip())
         set_cell(constant, out_row, 120, safe_str(r20))
         set_cell(constant, out_row, 121, safe_str(r21))
         set_cell(constant, out_row, 123, safe_str(r23))
 
-        # ✅ ORA corecta (din ws_values data_only=True)
+        # ✅ ORA corecta
         set_cell(constant, out_row, 122, format_time_value(ora_value))
 
         v119 = safe_str(constant.cell(out_row, 119).value)
@@ -244,8 +362,8 @@ def build_constant_fast(wb, ws, ws_values):
     for i in range(1, lastRow + 1):
         col6 = safe_str(ws.cell(i, 6).value)
 
-        # ✅ ora citita din workbook data_only=True
-        ora_value = ws_values.cell(i, 2).value
+        # ✅ ora din Sheet1 col2 (inclusiv formule)
+        ora_value = get_time_value_for_row(ws, ws_values, i)
 
         if like_prefix(col6, "PLAYLIST_IN_"):
             insidePlaylist = True
@@ -266,77 +384,8 @@ def build_constant_fast(wb, ws, ws_values):
 
         write_row(ws.cell(i, 19).value, ws.cell(i, 20).value, ws.cell(i, 21).value, ws.cell(i, 23).value, ora_value)
 
-        cell19 = safe_str(ws.cell(i, 19).value).strip()
-        if cell19 != "" and (not bad_prefix_19(cell19)) and (not excluded_by_list(cell19)):
-            write_row("ID CUB_PUB_TEST", "", "", "", ora_value)
-
     return constant
 
-def AdaugaEventNote(constant):
-    lastRow = get_last_row_in_col(constant, 119)
-
-    eventNoteAdded119 = False
-    for i in range(1, lastRow + 1):
-        v119 = safe_str(constant.cell(i, 119).value)
-        v122 = safe_str(constant.cell(i, 122).value)
-        if v119 != "" and not eventNoteAdded119:
-            set_cell(constant, i, 124, f"{v122} {v119}".strip())
-            eventNoteAdded119 = True
-        elif v119 == "":
-            eventNoteAdded119 = False
-
-    eventNoteAdded120 = False
-    for i in range(1, lastRow + 1):
-        v120 = safe_str(constant.cell(i, 120).value)
-        v122 = safe_str(constant.cell(i, 122).value)
-        if v120 != "" and not eventNoteAdded120:
-            set_cell(constant, i, 124, f"{v122} {v120}".strip())
-            eventNoteAdded120 = True
-        elif v120 == "":
-            eventNoteAdded120 = False
-
-    for i in range(1, lastRow + 1):
-        v121 = safe_str(constant.cell(i, 121).value)
-        v122 = safe_str(constant.cell(i, 122).value)
-        if v121 != "":
-            set_cell(constant, i, 124, f"{v122} {v121}".strip())
-
-def UnireColoane119Si121(constant):
-    lastRow = get_last_row_in_col(constant, 119)
-    for i in range(1, lastRow + 1):
-        v119 = safe_str(constant.cell(i, 119).value)
-        v121 = safe_str(constant.cell(i, 121).value)
-        set_cell(constant, i, 125, f"{v119} {v121}".strip())
-
-def ActualizareColoana123(constant):
-    lastRow = get_last_row_in_col(constant, 123)
-    exclude = {"ceas+direct", "ceas + direct", "."}
-
-    for i in range(1, lastRow + 1):
-        v = safe_str(constant.cell(i, 123).value).strip()
-        low = v.lower()
-
-        if low in exclude:
-            constant.cell(i, 123).value = None
-            continue
-
-        if low == "pub_start":
-            set_cell(constant, i, 123, "pub_start   #COLOR 65535")
-        elif low == "pub_stop":
-            set_cell(constant, i, 123, "pub_stop   #COLOR 4227327")
-        elif low == "ceas":
-            set_cell(constant, i, 123, "ceas   #COLOR 8421631")
-        elif low == "ap":
-            set_cell(constant, i, 123, "ap   #COLOR 8454016")
-        elif low in ("cr+ap", "cr+12", "cr+15"):
-            set_cell(constant, i, 123, f"{low}   #COLOR 16777088")
-        elif low in ("reluare_in", "reluare_mid", "reluare_out"):
-            set_cell(constant, i, 123, f"{low}   #COLOR 16744448")
-        elif low in ("premiera_in", "premiera_mid", "premiera_out", "premiera_ap", "premiera_12", "premiera_15"):
-            set_cell(constant, i, 123, f"{low}   #COLOR 8388863")
-        else:
-            if constant.cell(i, 123).value not in (None, ""):
-                constant.cell(i, 123).font = WHITE_FONT
 
 def clear_sheet1_cols(ws):
     lastRow = get_last_row_in_col(ws, 4)
@@ -346,16 +395,16 @@ def clear_sheet1_cols(ws):
         ws.cell(r, 21).value = None
         ws.cell(r, 23).value = None
 
+
 # =========================
 # MAIN PROCESS
 # =========================
 def process_excel(path: Path) -> Path:
     keep_vba = (path.suffix.lower() == ".xlsm")
 
-    # 1) workbook principal (pastreaza formule + VBA) -> asta salvam
+    # workbook principal (pastram VBA)
     wb = openpyxl.load_workbook(path, keep_vba=keep_vba, data_only=False)
-
-    # 2) workbook de citire valori (valorile calculate din formule)
+    # workbook pentru values (daca exista cached results)
     wb_values = openpyxl.load_workbook(path, keep_vba=keep_vba, data_only=True)
 
     if "Sheet1" not in wb.sheetnames:
@@ -370,17 +419,14 @@ def process_excel(path: Path) -> Path:
     ActualizareColoana23(ws)
     AdaugaCategoryDinColoana21(ws)
 
-    constant = build_constant_fast(wb, ws, ws_values)
-
-    AdaugaEventNote(constant)
-    UnireColoane119Si121(constant)
-    ActualizareColoana123(constant)
+    build_constant_fast(wb, ws, ws_values)
 
     clear_sheet1_cols(ws)
 
     out = path.with_name(path.stem + "_modificat" + path.suffix)
     wb.save(out)
     return out
+
 
 # =========================
 # TELEGRAM
@@ -401,7 +447,7 @@ async def handle_file(msg: types.Message):
 
     if ext == ".xls":
         await msg.answer(
-            "❌ Fișier .xls (format vechi) nu e suportat pe Render Free.\n"
+            "❌ Fișier .xls (format vechi) nu e suportat aici.\n"
             "✅ Te rog: Excel → Save As → .xlsx și retrimite."
         )
         return
@@ -427,6 +473,7 @@ async def handle_file(msg: types.Message):
             return
 
         await msg.answer_document(types.FSInputFile(out_file), caption="✅ Gata. Iată fișierul procesat.")
+
 
 # =========================
 # HEALTH SERVER (Render Web Service)
