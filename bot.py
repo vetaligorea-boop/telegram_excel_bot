@@ -4,6 +4,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from datetime import datetime, time as dtime
+import math
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
@@ -19,17 +20,14 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN lipseste din Render -> Environment Variables")
 
-# Render Web Service da automat PORT; daca nu exista, folosim 10000
 PORT = int(os.getenv("PORT", "10000"))
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Render Free: .xls nu e suportat (ar necesita LibreOffice)
-ALLOWED_EXT = {".xlsx", ".xlsm"}
+ALLOWED_EXT = {".xlsx", ".xlsm"}  # .xls nu e suportat pe Render Free
 
-# Font alb (ARGB). In Excel: alb = FFFFFF
-WHITE_FONT = Font(color="FFFFFFFF")
+WHITE_FONT = Font(color="FFFFFFFF")  # alb (ARGB)
 
 
 # =========================
@@ -47,25 +45,13 @@ def set_cell(ws, row: int, col: int, value):
     c.font = WHITE_FONT
 
 def get_last_row_in_col(ws, col: int) -> int:
-    # cauta ultimul rand nenul in coloana col
     for r in range(ws.max_row, 0, -1):
         v = ws.cell(r, col).value
         if v not in (None, ""):
             return r
     return 1
 
-def format_time_value(v) -> str:
-    # echivalent VBA: Format(value, "hh:nn:ss")
-    if isinstance(v, datetime):
-        return v.strftime("%H:%M:%S")
-    if isinstance(v, dtime):
-        return v.strftime("%H:%M:%S")
-    # fallback
-    s = safe_str(v).strip()
-    return s
-
 def get_fill_rgb_safe(cell):
-    # detectam galbenul (ColorIndex 6) aproximativ: FFFFFF00
     try:
         f = cell.fill
         if not f or not f.patternType:
@@ -75,21 +61,50 @@ def get_fill_rgb_safe(cell):
         return None
 
 def is_yellow_colorindex6(cell) -> bool:
+    # galben in multe fisiere = FFFFFF00 / FFFF00
     rgb = get_fill_rgb_safe(cell)
     return rgb in ("FFFFFF00", "FFFF00")
+
+def format_time_value(v) -> str:
+    """
+    Converteste valoarea din Excel (coloana ORA) in text HH:MM:SS.
+    Excel poate tine ora ca:
+    - datetime / time  -> ok
+    - numar (fractia din zi) -> convertim (0.5 = 12:00:00)
+    - text "06:30:00"
+    - 0 / 0.0 / "0"
+    """
+    if v is None or v == "":
+        return ""
+
+    if isinstance(v, datetime):
+        return v.strftime("%H:%M:%S")
+
+    if isinstance(v, dtime):
+        return v.strftime("%H:%M:%S")
+
+    # daca e numar (time fraction)
+    if isinstance(v, (int, float)):
+        frac = float(v) % 1.0
+        total_seconds = int(round(frac * 86400))
+        total_seconds = total_seconds % 86400
+
+        hh = total_seconds // 3600
+        mm = (total_seconds % 3600) // 60
+        ss = total_seconds % 60
+        return f"{hh:02d}:{mm:02d}:{ss:02d}"
+
+    # daca e text
+    s = safe_str(v).strip()
+    if s == "0":
+        return "00:00:00"
+    return s
 
 
 # =========================
 # VBA logic (partial, fara insert_rows)
 # =========================
 def CopiereAutomataCombinata(ws):
-    """
-    Traduce logica ta de baza:
-    - copie din col4 in col19 sau col21 (cu exceptii)
-    - copie intre PLAYLIST_IN/OUT din col6 in col20
-    - reguli CCA doar in col20
-    - la randurile cu PLAYLIST_IN/OUT: col20 = col4 si col19 gol
-    """
     lastRow = get_last_row_in_col(ws, 4)
     insidePlaylist = False
 
@@ -101,21 +116,17 @@ def CopiereAutomataCombinata(ws):
             col6 = safe_str(ws.cell(i, 6).value)
             col3 = ws.cell(i, 3).value
 
-            # ID PUB_* => col19 daca nu e marker playlist
             if (cellValue.startswith("ID PUB_") or cellValue.startswith("ID_PUB_") or cellValue.startswith("ID PUB")):
                 if not (like_prefix(col6, "PLAYLIST_IN_") or like_prefix(col6, "PLAYLIST_OUT_")):
                     set_cell(ws, i, 19, cellValue)
 
-            # daca col3 nu e gol => col21
             elif col3 not in (None, ""):
                 set_cell(ws, i, 21, cellValue)
 
-            # altfel => col19 (daca col21 e gol)
             else:
                 if safe_str(ws.cell(i, 21).value) == "":
                     set_cell(ws, i, 19, cellValue)
 
-        # copiere intre PLAYLIST_IN/OUT din col6 in col20 (cand col19 si col21 sunt goale)
         col6_val = safe_str(ws.cell(i, 6).value)
         if like_prefix(col6_val, "PLAYLIST_IN_"):
             insidePlaylist = True
@@ -127,13 +138,11 @@ def CopiereAutomataCombinata(ws):
         else:
             ws.cell(i, 20).value = None
 
-        # CCA doar in col20
         dval = safe_str(ws.cell(i, 4).value)
         if dval in ("CCA_SARE_ZAHAR_GRASIMI", "CCA_ORELE_MESEI", "CCA_GIMNASTICA", "CCA_FRUCTE", "CCA_BEA_APA"):
             set_cell(ws, i, 20, dval)
             ws.cell(i, 19).value = None
 
-        # pentru randurile cu PLAYLIST_IN/OUT => col20 = col4, col19 gol
         col6_val2 = safe_str(ws.cell(i, 6).value)
         if like_prefix(col6_val2, "PLAYLIST_IN_") or like_prefix(col6_val2, "PLAYLIST_OUT_"):
             set_cell(ws, i, 20, safe_str(ws.cell(i, 4).value))
@@ -141,9 +150,6 @@ def CopiereAutomataCombinata(ws):
 
 
 def ActualizareColoana23(ws):
-    """
-    Pune pub_start/pub_stop + #COLOR pe col23, plus normalizeaza cateva valori.
-    """
     lastRow = get_last_row_in_col(ws, 6)
 
     for i in range(1, lastRow + 1):
@@ -172,10 +178,6 @@ def ActualizareColoana23(ws):
 
 
 def AdaugaCategoryDinColoana21(ws):
-    """
-    Daca exista valoare in col21, pune in col23 valoarea din col3 (fara #CATEGORY),
-    exceptand FILLER, Ceas + Direct, CEC.
-    """
     exclude = {"FILLER", "Ceas + Direct", "CEC"}
     lastRow = get_last_row_in_col(ws, 21)
 
@@ -190,21 +192,13 @@ def AdaugaCategoryDinColoana21(ws):
 # constant sheet fast build (fara insert_rows)
 # =========================
 def build_constant_fast(wb, ws):
-    """
-    Construim direct sheet-ul constant, fara sa inseram randuri in Sheet1.
-    Simulam:
-    - InsertCUB_PUB_TEST => randuri cu col120="ID CUB_PUB_TEST" intre elemente din playlist
-    - AdaugaCubPubTestInColoana19 => randuri cu col119="ID CUB_PUB_TEST" dupa col19 valid (cu reguli simple)
-    """
     if "constant" in wb.sheetnames:
         constant = wb["constant"]
-        # curatam total ca sa nu ramana resturi
         if constant.max_row > 0:
             constant.delete_rows(1, constant.max_row)
     else:
         constant = wb.create_sheet("constant")
 
-    # mutam constant la final
     sheets = wb._sheets
     if constant in sheets:
         sheets.remove(constant)
@@ -255,10 +249,9 @@ def build_constant_fast(wb, ws):
         set_cell(constant, out_row, 121, safe_str(r21))
         set_cell(constant, out_row, 123, safe_str(r23))
 
-        # col122 = ora din Sheet1 col2 (format)
+        # ORA corecta
         set_cell(constant, out_row, 122, format_time_value(t_col2))
 
-        # col125 = 119 + " " + 121
         v119 = safe_str(constant.cell(out_row, 119).value)
         v121 = safe_str(constant.cell(out_row, 121).value)
         set_cell(constant, out_row, 125, f"{v119} {v121}".strip())
@@ -269,7 +262,6 @@ def build_constant_fast(wb, ws):
         t_col2 = ws.cell(i, 2).value
         col6 = safe_str(ws.cell(i, 6).value)
 
-        # detectam blocuri playlist
         if like_prefix(col6, "PLAYLIST_IN_"):
             insidePlaylist = True
             firstValueFound = False
@@ -281,17 +273,14 @@ def build_constant_fast(wb, ws):
             write_row(ws.cell(i, 19).value, ws.cell(i, 20).value, ws.cell(i, 21).value, ws.cell(i, 23).value, t_col2)
             continue
 
-        # simulam InsertCUB_PUB_TEST (doar in constant)
         if insidePlaylist:
             if not firstValueFound:
                 firstValueFound = True
             else:
                 write_row("", "ID CUB_PUB_TEST", "", "", t_col2)
 
-        # rândul original
         write_row(ws.cell(i, 19).value, ws.cell(i, 20).value, ws.cell(i, 21).value, ws.cell(i, 23).value, t_col2)
 
-        # simulam AdaugaCubPubTestInColoana19 (doar in constant)
         cell19 = safe_str(ws.cell(i, 19).value).strip()
         if cell19 != "" and (not bad_prefix_19(cell19)) and (not excluded_by_list(cell19)):
             write_row("ID CUB_PUB_TEST", "", "", "", t_col2)
@@ -300,15 +289,8 @@ def build_constant_fast(wb, ws):
 
 
 def AdaugaEventNote(constant):
-    """
-    Reface coloana 124 dupa regulile tale:
-    - prima valoare din grup pt col119 -> 124 = col122 + col119
-    - prima valoare din grup pt col120 -> 124 = col122 + col120
-    - daca col121 are valoare -> 124 = col122 + col121
-    """
     lastRow = get_last_row_in_col(constant, 119)
 
-    # grupuri col119
     eventNoteAdded119 = False
     for i in range(1, lastRow + 1):
         v119 = safe_str(constant.cell(i, 119).value)
@@ -319,7 +301,6 @@ def AdaugaEventNote(constant):
         elif v119 == "":
             eventNoteAdded119 = False
 
-    # grupuri col120
     eventNoteAdded120 = False
     for i in range(1, lastRow + 1):
         v120 = safe_str(constant.cell(i, 120).value)
@@ -330,7 +311,6 @@ def AdaugaEventNote(constant):
         elif v120 == "":
             eventNoteAdded120 = False
 
-    # col121 mereu
     for i in range(1, lastRow + 1):
         v121 = safe_str(constant.cell(i, 121).value)
         v122 = safe_str(constant.cell(i, 122).value)
@@ -347,9 +327,6 @@ def UnireColoane119Si121(constant):
 
 
 def ActualizareColoana123(constant):
-    """
-    Aplica culori in col123 (pe constant) ca in codul tau.
-    """
     lastRow = get_last_row_in_col(constant, 123)
     exclude = {"ceas+direct", "ceas + direct", "."}
 
@@ -381,10 +358,6 @@ def ActualizareColoana123(constant):
 
 
 def clear_sheet1_cols(ws):
-    """
-    Equivalent simplu pentru ResetSheet1:
-    la final, curatam doar continutul coloanelor 19/20/21/23 ca sa revina Sheet1 "curat".
-    """
     lastRow = get_last_row_in_col(ws, 4)
     for r in range(1, lastRow + 1):
         ws.cell(r, 19).value = None
@@ -405,20 +378,16 @@ def process_excel(path: Path) -> Path:
 
     ws = wb["Sheet1"]
 
-    # 1) Partea rapida pe Sheet1 (fara insert_rows)
     CopiereAutomataCombinata(ws)
     ActualizareColoana23(ws)
     AdaugaCategoryDinColoana21(ws)
 
-    # 2) Construim constant rapid (simulam inserarile in constant)
     constant = build_constant_fast(wb, ws)
 
-    # 3) Coloana 124, 125 si 123 pe constant
     AdaugaEventNote(constant)
     UnireColoane119Si121(constant)
     ActualizareColoana123(constant)
 
-    # 4) Curatam Sheet1 ca in fluxul tau (sa ramana ca in IN)
     clear_sheet1_cols(ws)
 
     out = path.with_name(path.stem + "_modificat" + path.suffix)
@@ -427,7 +396,7 @@ def process_excel(path: Path) -> Path:
 
 
 # =========================
-# TELEGRAM
+# TELEGRAM HANDLERS
 # =========================
 @dp.message(CommandStart())
 async def start(msg: types.Message):
@@ -493,9 +462,7 @@ async def run_health_server():
 
 
 async def main():
-    # deschidem portul ca Render Web Service sa nu opreasca procesul
     await run_health_server()
-    # pornim botul
     await dp.start_polling(bot)
 
 
