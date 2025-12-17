@@ -124,10 +124,8 @@ def excel_time_to_seconds(v) -> float:
     if isinstance(v, dtime):
         return v.hour * 3600 + v.minute * 60 + v.second
     if isinstance(v, (int, float)):
-        # fracție de zi
         frac = float(v) % 1.0
         return frac * 86400.0
-    # text "HH:MM:SS"
     s = safe_str(v).strip()
     if re.match(r"^\d{1,2}:\d{2}:\d{2}$", s):
         hh, mm, ss = s.split(":")
@@ -145,8 +143,8 @@ def eval_simple_time_formula(formula: str, ws, ws_values):
       =B5+E5
       =A1+C1
       =B2+0.001
-      =B2- C2
-    Nu suportă funcții (TIME(), IF(), etc.) – dacă există, return None.
+      =B2-C2
+    Nu suportă funcții (TIME(), IF(), TEXT() etc.) – dacă există, return None.
     """
     if not isinstance(formula, str):
         return None
@@ -156,12 +154,9 @@ def eval_simple_time_formula(formula: str, ws, ws_values):
 
     expr = f[1:].replace(" ", "")
 
-    # dacă are funcții, paranteze, etc. -> nu încercăm
     if "(" in expr or ")" in expr:
         return None
 
-    # tokenizare simplă pe + și -
-    # păstrăm operatorii
     parts = re.split(r"([+\-])", expr)
     if not parts:
         return None
@@ -179,24 +174,18 @@ def eval_simple_time_formula(formula: str, ws, ws_values):
 
         sec = None
 
-        # 1) cell ref?
         ref = parse_cell_ref(part)
         if ref:
             r, c = ref
-            # preferăm valoarea "data_only" dacă există
             v = ws_values.cell(r, c).value
             if v in (None, ""):
                 v = ws.cell(r, c).value
             sec = excel_time_to_seconds(v)
-
         else:
-            # 2) numeric literal?
             try:
                 num = float(part)
-                # Excel numeric time fraction -> sec
                 sec = excel_time_to_seconds(num)
             except Exception:
-                # 3) text HH:MM:SS?
                 sec = excel_time_to_seconds(part)
 
         if sec is None:
@@ -212,32 +201,29 @@ def eval_simple_time_formula(formula: str, ws, ws_values):
 
     return seconds_to_excel_fraction(total_sec)
 
-
 def get_time_value_for_row(ws, ws_values, row: int):
     """
-    Ia ora pentru randul 'row' din Sheet1 col 2:
+    Ia ORA pentru randul 'row' din Sheet1 col 2:
     - dacă data_only are valoare, o folosim
-    - altfel, dacă e formulă, o calculăm noi (simple + / -)
+    - altfel, dacă e formulă simplă (=xx+xx), o calculăm noi
     - altfel, luăm direct valoarea
     """
-    # 1) încearcă valoarea calculată (cached) din data_only
     v_cached = ws_values.cell(row, 2).value
-    if v_cached not in (None, "", 0, "0"):
+    # dacă cached e 0, e posibil să nu fie calculat -> încercăm formula
+    if v_cached not in (None, "") and str(v_cached) != "0":
         return v_cached
 
-    # 2) verifică formula în workbook normal
     v_raw = ws.cell(row, 2).value
     if isinstance(v_raw, str) and v_raw.strip().startswith("="):
         v_eval = eval_simple_time_formula(v_raw, ws, ws_values)
         if v_eval is not None:
             return v_eval
 
-    # 3) fallback direct
     return v_raw
 
 
 # =========================
-# LOGIC (partea ta)
+# LOGIC Sheet1 (simplificat)
 # =========================
 def CopiereAutomataCombinata(ws):
     lastRow = get_last_row_in_col(ws, 4)
@@ -279,7 +265,7 @@ def CopiereAutomataCombinata(ws):
         col6_val2 = safe_str(ws.cell(i, 6).value)
         if like_prefix(col6_val2, "PLAYLIST_IN_") or like_prefix(col6_val2, "PLAYLIST_OUT_"):
             set_cell(ws, i, 20, safe_str(ws.cell(i, 4).value))
-            ws.cell(i, 19).value = None
+            ws.cell(i, 19 (!) ).value = None
 
 
 def ActualizareColoana23(ws):
@@ -320,7 +306,7 @@ def AdaugaCategoryDinColoana21(ws):
 
 
 # =========================
-# constant sheet build
+# BUILD constant
 # =========================
 def build_constant_fast(wb, ws, ws_values):
     if "constant" in wb.sheetnames:
@@ -344,13 +330,11 @@ def build_constant_fast(wb, ws, ws_values):
 
     def write_row(r19, r20, r21, r23, ora_value):
         nonlocal out_row
-
         set_cell(constant, out_row, 119, safe_str(r19).strip())
         set_cell(constant, out_row, 120, safe_str(r20))
         set_cell(constant, out_row, 121, safe_str(r21))
         set_cell(constant, out_row, 123, safe_str(r23))
 
-        # ✅ ORA corecta
         set_cell(constant, out_row, 122, format_time_value(ora_value))
 
         v119 = safe_str(constant.cell(out_row, 119).value)
@@ -361,8 +345,6 @@ def build_constant_fast(wb, ws, ws_values):
 
     for i in range(1, lastRow + 1):
         col6 = safe_str(ws.cell(i, 6).value)
-
-        # ✅ ora din Sheet1 col2 (inclusiv formule)
         ora_value = get_time_value_for_row(ws, ws_values, i)
 
         if like_prefix(col6, "PLAYLIST_IN_"):
@@ -387,6 +369,42 @@ def build_constant_fast(wb, ws, ws_values):
     return constant
 
 
+def AdaugaEventNote(constant):
+    """
+    Completeaza coloana 124 in sheet-ul constant:
+    - pentru primul rand dintr-un grup (cand 119 are valoare) pune: 122 + 119
+    - pentru primul rand dintr-un grup (cand 120 are valoare) pune: 122 + 120
+    - pentru fiecare rand unde 121 are valoare pune: 122 + 121
+    """
+    lastRow = get_last_row_in_col(constant, 119)
+
+    eventNoteAdded119 = False
+    for i in range(1, lastRow + 1):
+        v119 = safe_str(constant.cell(i, 119).value).strip()
+        v122 = safe_str(constant.cell(i, 122).value).strip()
+        if v119 != "" and not eventNoteAdded119:
+            set_cell(constant, i, 124, f"{v122} {v119}".strip())
+            eventNoteAdded119 = True
+        elif v119 == "":
+            eventNoteAdded119 = False
+
+    eventNoteAdded120 = False
+    for i in range(1, lastRow + 1):
+        v120 = safe_str(constant.cell(i, 120).value).strip()
+        v122 = safe_str(constant.cell(i, 122).value).strip()
+        if v120 != "" and not eventNoteAdded120:
+            set_cell(constant, i, 124, f"{v122} {v120}".strip())
+            eventNoteAdded120 = True
+        elif v120 == "":
+            eventNoteAdded120 = False
+
+    for i in range(1, lastRow + 1):
+        v121 = safe_str(constant.cell(i, 121).value).strip()
+        v122 = safe_str(constant.cell(i, 122).value).strip()
+        if v121 != "":
+            set_cell(constant, i, 124, f"{v122} {v121}".strip())
+
+
 def clear_sheet1_cols(ws):
     lastRow = get_last_row_in_col(ws, 4)
     for r in range(1, lastRow + 1):
@@ -402,9 +420,7 @@ def clear_sheet1_cols(ws):
 def process_excel(path: Path) -> Path:
     keep_vba = (path.suffix.lower() == ".xlsm")
 
-    # workbook principal (pastram VBA)
     wb = openpyxl.load_workbook(path, keep_vba=keep_vba, data_only=False)
-    # workbook pentru values (daca exista cached results)
     wb_values = openpyxl.load_workbook(path, keep_vba=keep_vba, data_only=True)
 
     if "Sheet1" not in wb.sheetnames:
@@ -419,7 +435,8 @@ def process_excel(path: Path) -> Path:
     ActualizareColoana23(ws)
     AdaugaCategoryDinColoana21(ws)
 
-    build_constant_fast(wb, ws, ws_values)
+    constant = build_constant_fast(wb, ws, ws_values)
+    AdaugaEventNote(constant)  # ✅ coloana 124 revine
 
     clear_sheet1_cols(ws)
 
