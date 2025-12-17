@@ -1,10 +1,8 @@
 import asyncio
 import os
-import shutil
 import tempfile
 from pathlib import Path
 from datetime import datetime, time as dtime
-import math
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
@@ -26,9 +24,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 ALLOWED_EXT = {".xlsx", ".xlsm"}  # .xls nu e suportat pe Render Free
-
 WHITE_FONT = Font(color="FFFFFFFF")  # alb (ARGB)
-
 
 # =========================
 # HELPERS
@@ -61,18 +57,15 @@ def get_fill_rgb_safe(cell):
         return None
 
 def is_yellow_colorindex6(cell) -> bool:
-    # galben in multe fisiere = FFFFFF00 / FFFF00
     rgb = get_fill_rgb_safe(cell)
     return rgb in ("FFFFFF00", "FFFF00")
 
 def format_time_value(v) -> str:
     """
     Converteste valoarea din Excel (coloana ORA) in text HH:MM:SS.
-    Excel poate tine ora ca:
-    - datetime / time  -> ok
-    - numar (fractia din zi) -> convertim (0.5 = 12:00:00)
-    - text "06:30:00"
-    - 0 / 0.0 / "0"
+    - datetime/time -> ok
+    - numar (fractia din zi) -> convertim
+    - text "06:30:00" -> pastram
     """
     if v is None or v == "":
         return ""
@@ -83,23 +76,18 @@ def format_time_value(v) -> str:
     if isinstance(v, dtime):
         return v.strftime("%H:%M:%S")
 
-    # daca e numar (time fraction)
     if isinstance(v, (int, float)):
         frac = float(v) % 1.0
-        total_seconds = int(round(frac * 86400))
-        total_seconds = total_seconds % 86400
-
+        total_seconds = int(round(frac * 86400)) % 86400
         hh = total_seconds // 3600
         mm = (total_seconds % 3600) // 60
         ss = total_seconds % 60
         return f"{hh:02d}:{mm:02d}:{ss:02d}"
 
-    # daca e text
     s = safe_str(v).strip()
     if s == "0":
         return "00:00:00"
     return s
-
 
 # =========================
 # VBA logic (partial, fara insert_rows)
@@ -148,10 +136,8 @@ def CopiereAutomataCombinata(ws):
             set_cell(ws, i, 20, safe_str(ws.cell(i, 4).value))
             ws.cell(i, 19).value = None
 
-
 def ActualizareColoana23(ws):
     lastRow = get_last_row_in_col(ws, 6)
-
     for i in range(1, lastRow + 1):
         col6 = safe_str(ws.cell(i, 6).value)
 
@@ -176,22 +162,19 @@ def ActualizareColoana23(ws):
             else:
                 ws.cell(i, 23).font = WHITE_FONT
 
-
 def AdaugaCategoryDinColoana21(ws):
     exclude = {"FILLER", "Ceas + Direct", "CEC"}
     lastRow = get_last_row_in_col(ws, 21)
-
     for i in range(1, lastRow + 1):
         col21 = ws.cell(i, 21).value
         col3 = safe_str(ws.cell(i, 3).value)
         if col21 not in (None, "") and col3 not in exclude:
             set_cell(ws, i, 23, col3)
 
-
 # =========================
-# constant sheet fast build (fara insert_rows)
+# constant sheet fast build (ORA citita din data_only sheet!)
 # =========================
-def build_constant_fast(wb, ws):
+def build_constant_fast(wb, ws, ws_values):
     if "constant" in wb.sheetnames:
         constant = wb["constant"]
         if constant.max_row > 0:
@@ -236,7 +219,7 @@ def build_constant_fast(wb, ws):
     insidePlaylist = False
     firstValueFound = False
 
-    def write_row(r19, r20, r21, r23, t_col2):
+    def write_row(r19, r20, r21, r23, ora_value):
         nonlocal out_row
 
         r19s = safe_str(r19).strip()
@@ -249,8 +232,8 @@ def build_constant_fast(wb, ws):
         set_cell(constant, out_row, 121, safe_str(r21))
         set_cell(constant, out_row, 123, safe_str(r23))
 
-        # ORA corecta
-        set_cell(constant, out_row, 122, format_time_value(t_col2))
+        # ✅ ORA corecta (din ws_values data_only=True)
+        set_cell(constant, out_row, 122, format_time_value(ora_value))
 
         v119 = safe_str(constant.cell(out_row, 119).value)
         v121 = safe_str(constant.cell(out_row, 121).value)
@@ -259,34 +242,35 @@ def build_constant_fast(wb, ws):
         out_row += 1
 
     for i in range(1, lastRow + 1):
-        t_col2 = ws.cell(i, 2).value
         col6 = safe_str(ws.cell(i, 6).value)
+
+        # ✅ ora citita din workbook data_only=True
+        ora_value = ws_values.cell(i, 2).value
 
         if like_prefix(col6, "PLAYLIST_IN_"):
             insidePlaylist = True
             firstValueFound = False
-            write_row(ws.cell(i, 19).value, ws.cell(i, 20).value, ws.cell(i, 21).value, ws.cell(i, 23).value, t_col2)
+            write_row(ws.cell(i, 19).value, ws.cell(i, 20).value, ws.cell(i, 21).value, ws.cell(i, 23).value, ora_value)
             continue
 
         if like_prefix(col6, "PLAYLIST_OUT_"):
             insidePlaylist = False
-            write_row(ws.cell(i, 19).value, ws.cell(i, 20).value, ws.cell(i, 21).value, ws.cell(i, 23).value, t_col2)
+            write_row(ws.cell(i, 19).value, ws.cell(i, 20).value, ws.cell(i, 21).value, ws.cell(i, 23).value, ora_value)
             continue
 
         if insidePlaylist:
             if not firstValueFound:
                 firstValueFound = True
             else:
-                write_row("", "ID CUB_PUB_TEST", "", "", t_col2)
+                write_row("", "ID CUB_PUB_TEST", "", "", ora_value)
 
-        write_row(ws.cell(i, 19).value, ws.cell(i, 20).value, ws.cell(i, 21).value, ws.cell(i, 23).value, t_col2)
+        write_row(ws.cell(i, 19).value, ws.cell(i, 20).value, ws.cell(i, 21).value, ws.cell(i, 23).value, ora_value)
 
         cell19 = safe_str(ws.cell(i, 19).value).strip()
         if cell19 != "" and (not bad_prefix_19(cell19)) and (not excluded_by_list(cell19)):
-            write_row("ID CUB_PUB_TEST", "", "", "", t_col2)
+            write_row("ID CUB_PUB_TEST", "", "", "", ora_value)
 
     return constant
-
 
 def AdaugaEventNote(constant):
     lastRow = get_last_row_in_col(constant, 119)
@@ -317,14 +301,12 @@ def AdaugaEventNote(constant):
         if v121 != "":
             set_cell(constant, i, 124, f"{v122} {v121}".strip())
 
-
 def UnireColoane119Si121(constant):
     lastRow = get_last_row_in_col(constant, 119)
     for i in range(1, lastRow + 1):
         v119 = safe_str(constant.cell(i, 119).value)
         v121 = safe_str(constant.cell(i, 121).value)
         set_cell(constant, i, 125, f"{v119} {v121}".strip())
-
 
 def ActualizareColoana123(constant):
     lastRow = get_last_row_in_col(constant, 123)
@@ -356,7 +338,6 @@ def ActualizareColoana123(constant):
             if constant.cell(i, 123).value not in (None, ""):
                 constant.cell(i, 123).font = WHITE_FONT
 
-
 def clear_sheet1_cols(ws):
     lastRow = get_last_row_in_col(ws, 4)
     for r in range(1, lastRow + 1):
@@ -365,24 +346,31 @@ def clear_sheet1_cols(ws):
         ws.cell(r, 21).value = None
         ws.cell(r, 23).value = None
 
-
 # =========================
 # MAIN PROCESS
 # =========================
 def process_excel(path: Path) -> Path:
     keep_vba = (path.suffix.lower() == ".xlsm")
-    wb = openpyxl.load_workbook(path, keep_vba=keep_vba)
+
+    # 1) workbook principal (pastreaza formule + VBA) -> asta salvam
+    wb = openpyxl.load_workbook(path, keep_vba=keep_vba, data_only=False)
+
+    # 2) workbook de citire valori (valorile calculate din formule)
+    wb_values = openpyxl.load_workbook(path, keep_vba=keep_vba, data_only=True)
 
     if "Sheet1" not in wb.sheetnames:
         raise RuntimeError("Nu găsesc Sheet1 în fișier.")
+    if "Sheet1" not in wb_values.sheetnames:
+        raise RuntimeError("Nu găsesc Sheet1 în fișier (data_only).")
 
     ws = wb["Sheet1"]
+    ws_values = wb_values["Sheet1"]
 
     CopiereAutomataCombinata(ws)
     ActualizareColoana23(ws)
     AdaugaCategoryDinColoana21(ws)
 
-    constant = build_constant_fast(wb, ws)
+    constant = build_constant_fast(wb, ws, ws_values)
 
     AdaugaEventNote(constant)
     UnireColoane119Si121(constant)
@@ -394,9 +382,8 @@ def process_excel(path: Path) -> Path:
     wb.save(out)
     return out
 
-
 # =========================
-# TELEGRAM HANDLERS
+# TELEGRAM
 # =========================
 @dp.message(CommandStart())
 async def start(msg: types.Message):
@@ -405,7 +392,6 @@ async def start(msg: types.Message):
         "Trimite-mi un fișier Excel (.xlsx sau .xlsm) și îl procesez.\n"
         "⚠️ .xls nu este suportat aici — salvează-l ca .xlsx."
     )
-
 
 @dp.message(F.document)
 async def handle_file(msg: types.Message):
@@ -442,7 +428,6 @@ async def handle_file(msg: types.Message):
 
         await msg.answer_document(types.FSInputFile(out_file), caption="✅ Gata. Iată fișierul procesat.")
 
-
 # =========================
 # HEALTH SERVER (Render Web Service)
 # =========================
@@ -460,11 +445,9 @@ async def run_health_server():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
 
-
 async def main():
     await run_health_server()
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
