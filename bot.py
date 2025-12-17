@@ -362,6 +362,7 @@ def build_constant_fast(wb, ws, ws_values):
             if not firstValueFound:
                 firstValueFound = True
             else:
+                # echivalent InsertCUB_PUB_TEST -> ID in col 120 intre spoturi
                 write_row("", "ID CUB_PUB_TEST", "", "", ora_value)
 
         write_row(ws.cell(i, 19).value, ws.cell(i, 20).value, ws.cell(i, 21).value, ws.cell(i, 23).value, ora_value)
@@ -369,6 +370,71 @@ def build_constant_fast(wb, ws, ws_values):
     return constant
 
 
+# =========================
+# FIX col 119 (echivalent AdaugaCubPubTestInColoana19, dar pe constant col 119)
+# =========================
+def AdaugaCubPubTestInColoana119(constant):
+    """
+    Adaugă rând cu 'ID CUB_PUB_TEST' în col 119 după fiecare valoare din col 119,
+    cu excluderi + fără promo/pub.
+    """
+    exclude_contains = [
+        "Jurnalfinanciar", "Jurnalulfinanciar", "PROMO YOUTUBE", "YOUTUBE SOFIA",
+        "JurnalSportivNEW", "JurnalulSportiv NEW", "JurnalSportiv", "JurnalulSportiv",
+        "Carton ap", "Carton 12", "Carton 15",
+        "INTERZIS_AP", "INTERZIS_12", "INTERZIS_15",
+        "EarthTV", "stirile deficienta auz 17 HD", "MeteoNEW",
+        "PostScriptumNEW", "Promourile", "bumper", "Studio comentarii",
+        "Fotbal Repriza 1", "Stiri 10 min", "Fotbal Repriza 2", "REZUMATE",
+        "DE FACTO Cioban", "DE FACTO Ciobanu",
+        "PLANUL EUROPA CIOBANU", "PLANUL EUROPA CIOBAN",
+        "DeFacto Tulbure", "PLANUL EUROPA Tulbure",
+        "____PROMOURIIII___"
+    ]
+
+    def is_excluded(text: str) -> bool:
+        t = safe_str(text).strip().lower()
+        if t == "":
+            return True
+
+        # nu adăugăm după promo/pub
+        if t.startswith("id promo") or t.startswith("id_promo") or t.startswith("id promo_") or t.startswith("id_promo_"):
+            return True
+        if t.startswith("id pub") or t.startswith("id_pub") or t.startswith("id pub_") or t.startswith("id_pub_"):
+            return True
+
+        # exclude list contains
+        for e in exclude_contains:
+            if e.lower() in t:
+                return True
+
+        return False
+
+    lastRow = get_last_row_in_col(constant, 119)
+
+    # de jos in sus
+    for i in range(lastRow, 1, -1):
+        v119 = safe_str(constant.cell(i, 119).value).strip()
+
+        if v119 == "ID CUB_PUB_TEST":
+            continue
+        if is_excluded(v119):
+            continue
+
+        # insereaza rand sub i
+        constant.insert_rows(i + 1, 1)
+
+        # copiaza ORA (122) ca sa ramana corect
+        constant.cell(i + 1, 122).value = constant.cell(i, 122).value
+        constant.cell(i + 1, 122).font = WHITE_FONT
+
+        # pune ID in 119
+        set_cell(constant, i + 1, 119, "ID CUB_PUB_TEST")
+
+
+# =========================
+# col 124 (ORA + text)
+# =========================
 def AdaugaEventNote(constant):
     """
     Completeaza coloana 124 in sheet-ul constant:
@@ -431,13 +497,21 @@ def process_excel(path: Path) -> Path:
     ws = wb["Sheet1"]
     ws_values = wb_values["Sheet1"]
 
+    # 1) genereaza col 19/20/21 + 23 in Sheet1
     CopiereAutomataCombinata(ws)
     ActualizareColoana23(ws)
     AdaugaCategoryDinColoana21(ws)
 
+    # 2) construieste constant
     constant = build_constant_fast(wb, ws, ws_values)
+
+    # 3) adauga ID CUB_PUB_TEST in col 119 (ca in VBA)
+    AdaugaCubPubTestInColoana119(constant)
+
+    # 4) calculeaza col 124 (ORA + text)
     AdaugaEventNote(constant)
 
+    # 5) curata Sheet1
     clear_sheet1_cols(ws)
 
     out = path.with_name(path.stem + "_modificat" + path.suffix)
