@@ -7,6 +7,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.types import Message
 from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 
 from openpyxl import load_workbook
 from openpyxl.styles import Font
@@ -22,9 +23,6 @@ WHITE_FONT = Font(color="FFFFFF")
 def safe_str(v):
     return "" if v is None else str(v)
 
-def safe_lower(v):
-    return safe_str(v).lower()
-
 def set_cell(ws, r, c, value):
     ws.cell(r, c).value = value
     ws.cell(r, c).font = WHITE_FONT
@@ -36,14 +34,6 @@ def get_last_row(ws):
     return 1
 
 def excel_time_to_hms(v):
-    """
-    Acceptă:
-    - datetime
-    - time
-    - număr Excel
-    - text
-    Returnează HH:MM:SS
-    """
     if v is None or v == "":
         return ""
 
@@ -54,15 +44,14 @@ def excel_time_to_hms(v):
         return v.strftime("%H:%M:%S")
 
     if isinstance(v, (int, float)):
-        seconds = int(round(v * 24 * 3600))
+        seconds = int(round(v * 86400))
         h = seconds // 3600
         m = (seconds % 3600) // 60
         s = seconds % 60
         return f"{h:02d}:{m:02d}:{s:02d}"
 
-    txt = safe_str(v)
     try:
-        return datetime.strptime(txt[:8], "%H:%M:%S").strftime("%H:%M:%S")
+        return datetime.strptime(str(v)[:8], "%H:%M:%S").strftime("%H:%M:%S")
     except:
         return ""
 
@@ -72,45 +61,48 @@ def process_excel_file(input_path, output_path):
     wb = load_workbook(input_path, data_only=True)
     ws = wb["Sheet1"]
 
-    # creează / ia sheet constant
     if "constant" in wb.sheetnames:
-        constant = wb["constant"]
-        wb.remove(constant)
+        wb.remove(wb["constant"])
 
     constant = wb.create_sheet("constant")
 
     last_row = get_last_row(ws)
 
     for i in range(1, last_row + 1):
-        # col 19 -> 119
         set_cell(constant, i, 119, safe_str(ws.cell(i, 19).value))
-
-        # col 20 -> 120
         set_cell(constant, i, 120, safe_str(ws.cell(i, 20).value))
-
-        # col 21 -> 121
         set_cell(constant, i, 121, safe_str(ws.cell(i, 21).value))
 
-        # ORA din Sheet1 col 2 -> constant 122 (FORMAT HH:MM:SS)
         ora = excel_time_to_hms(ws.cell(i, 2).value)
         set_cell(constant, i, 122, ora)
 
-        # CATEGORY col 23 -> 123
         set_cell(constant, i, 123, safe_str(ws.cell(i, 23).value))
 
-        # EVENT NOTE col 124 = ORA + TEXT (119/120/121)
-        text_note = safe_str(ws.cell(i, 21).value) or safe_str(ws.cell(i, 20).value) or safe_str(ws.cell(i, 19).value)
+        text_note = (
+            safe_str(ws.cell(i, 21).value)
+            or safe_str(ws.cell(i, 20).value)
+            or safe_str(ws.cell(i, 19).value)
+        )
+
         if ora and text_note:
             set_cell(constant, i, 124, f"{ora} {text_note}")
 
-        # CONCAT 119 + 121 -> 125
-        set_cell(constant, i, 125, f"{safe_str(ws.cell(i, 19).value)} {safe_str(ws.cell(i, 21).value)}".strip())
+        set_cell(
+            constant,
+            i,
+            125,
+            f"{safe_str(ws.cell(i, 19).value)} {safe_str(ws.cell(i, 21).value)}".strip(),
+        )
 
     wb.save(output_path)
 
 # ================= TELEGRAM BOT =================
 
-bot = Bot(BOT_TOKEN, parse_mode=ParseMode.HTML)
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
+
 dp = Dispatcher()
 
 @dp.message(CommandStart())
@@ -123,7 +115,7 @@ async def handle_excel(msg: Message):
     name = doc.file_name.lower()
 
     if not name.endswith((".xls", ".xlsx", ".xlsm")):
-        await msg.answer("❌ Format invalid. Trimite Excel.")
+        await msg.answer("❌ Format invalid.")
         return
 
     await msg.answer("📥 Am primit fișierul. Procesez...")
@@ -133,10 +125,12 @@ async def handle_excel(msg: Message):
         out = os.path.join(tmp, "modificat_" + doc.file_name)
 
         await bot.download(doc, destination=inp)
-
         process_excel_file(inp, out)
 
-        await msg.answer_document(types.FSInputFile(out), caption="✅ Gata. Fișier procesat.")
+        await msg.answer_document(
+            types.FSInputFile(out),
+            caption="✅ Gata. Fișier procesat.",
+        )
 
 # ================= RUN =================
 
